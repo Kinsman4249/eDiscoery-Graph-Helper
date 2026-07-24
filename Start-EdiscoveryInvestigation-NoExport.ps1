@@ -43,6 +43,18 @@
 
 
 
+ PRESERVATION HOLD
+
+   -PlaceHold is independent of the query source above - it works the same
+
+   whether the query came from -ContentQuery, -Keywords, or
+
+   -UseFinancialTemplate. If -PlaceHold is not passed on the command line,
+
+   the script prompts interactively (y/N) instead.
+
+
+
  MINIMUM MODULES USED
 
    - Microsoft.Graph.Authentication
@@ -61,19 +73,19 @@
 
 
 
-   # Simple keyword builder
+   # Simple keyword builder, with a preservation hold (-PlaceHold works with any query source)
 
-   .\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -Keywords 'invoice','wire transfer','Interac' -KeywordOperator OR
-
-
-
-   # Built-in financial-activity preset
-
-   .\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -UseFinancialTemplate -PlaceHold
+   .\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -Keywords 'invoice','wire transfer','Interac' -KeywordOperator OR -PlaceHold
 
 
 
-   # Fully interactive (prompts for everything, including the query)
+   # Built-in financial-activity preset, no hold
+
+   .\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -UseFinancialTemplate
+
+
+
+   # Fully interactive (prompts for everything, including the query and the hold)
 
    .\Start-EdiscoveryInvestigation-NoExport.ps1
 

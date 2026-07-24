@@ -33,19 +33,26 @@ Instead of a fixed query, you can supply the content search query in any of thes
    with no parameters at all), it prompts you to choose one of the three options
    above, plus prompts for tenant, target mailbox, case name, and hold.
 
+## Preservation hold
+
+`-PlaceHold` is independent of how the query was built — it works the same whether
+you used `-ContentQuery`, `-Keywords`, or `-UseFinancialTemplate`, and it does not
+require the financial-activity preset. If `-PlaceHold` isn't passed on the command
+line, the script prompts for it interactively (y/N).
+
 ## Usage
 
 ```powershell
 # Raw KQL
 .\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -ContentQuery '"wire transfer" OR invoice'
 
-# Simple keyword builder
-.\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -Keywords 'invoice','wire transfer','Interac' -KeywordOperator OR
+# Simple keyword builder, with a preservation hold
+.\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -Keywords 'invoice','wire transfer','Interac' -KeywordOperator OR -PlaceHold
 
-# Built-in financial-activity preset, with a preservation hold
-.\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -UseFinancialTemplate -PlaceHold
+# Built-in financial-activity preset, no hold
+.\Start-EdiscoveryInvestigation-NoExport.ps1 -TenantId contoso.com -TargetUpn user@example.com -UseFinancialTemplate
 
-# Fully interactive — prompts for everything, including the query
+# Fully interactive — prompts for everything, including the query and the hold
 .\Start-EdiscoveryInvestigation-NoExport.ps1
 ```
 
