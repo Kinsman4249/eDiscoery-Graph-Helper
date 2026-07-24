@@ -1,0 +1,74 @@
+# =============================================================================
+# Release workflow
+# =============================================================================
+#
+# This repo ships a single PowerShell script with nothing to compile, so this
+# workflow does not build binaries. On a version tag it attaches the script
+# itself to a new GitHub Release, with auto-generated release notes.
+#
+# CUTTING A RELEASE
+# ------------------
+#     git tag v1.0.0
+#     git push origin v1.0.0
+#
+# RUNNING MANUALLY
+# -----------------
+# Actions tab > Release > Run workflow > enter an existing tag name.
+# =============================================================================
+
+name: Release
+
+on:
+  # Auto-trigger when a version tag like v1.0.0 / v1.2.3 is pushed.
+  push:
+    tags:
+      - 'v*.*.*'
+  # Manual fallback: re-run a release for an already-existing tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0). Must already exist.'
+        required: true
+        type: string
+
+# Least privilege: default all jobs to read-only. The release job elevates to
+# write only where it actually needs to publish.
+permissions:
+  contents: read
+
+# Stop two runs for the same tag from racing (e.g. a re-pushed tag while the
+# first run is still publishing). Do not cancel an in-flight publish.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and release
+    runs-on: ubuntu-latest
+
+    # Scoped elevation: this job needs write access to create the Release.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # On a tag push, github.ref is the pushed tag. On a manual run, use
+          # the tag name the operator typed into the workflow_dispatch input.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          # Auto-generate notes from merged PRs / commits since the previous tag.
+          generate_release_notes: true
+          # Attach the script itself so it can be downloaded directly from the
+          # release without cloning the repo.
+          files: Start-EdiscoveryInvestigation-NoExport.ps1
+          # Fail loudly if the file is missing, so a broken step cannot
+          # silently publish an empty release.
+          fail_on_unmatched_files: true
