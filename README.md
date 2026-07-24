@@ -33,6 +33,23 @@ Instead of a fixed query, you can supply the content search query in any of thes
    with no parameters at all), it prompts you to choose one of the three options
    above, plus prompts for tenant, target mailbox, case name, and hold.
 
+## Parameters
+
+| Flag | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `-TenantId` | string | No* | — | Client tenant domain or tenant GUID. Prompted interactively if omitted. |
+| `-TargetUpn` | string | No* | — | Mailbox under review (`user@example.com`). Prompted interactively if omitted. |
+| `-CaseName` | string | No | `Investigation-<mailbox-alias>-<yyyyMMdd>` | Case name shown in Purview eDiscovery. If omitted, you're prompted with the default shown in brackets; press Enter to accept it. |
+| `-ContentQuery` | string | No | — | Raw KQL search query, used exactly as given. Takes priority over `-Keywords` and `-UseFinancialTemplate`. |
+| `-Keywords` | string[] | No | — | Simple list of words/phrases to search for. Combined into KQL with `-KeywordOperator`. Ignored if `-ContentQuery` is set. |
+| `-KeywordOperator` | string (`AND`\|`OR`) | No | `OR` | How `-Keywords` entries are joined. |
+| `-UseFinancialTemplate` | switch | No | off | Uses the bundled financial-activity KQL preset instead of a custom query. Ignored if `-ContentQuery` or `-Keywords` is set. |
+| `-PlaceHold` | switch | No | off | Places a preservation hold on the mailbox. Independent of the query source — works with any of the options above. Prompted interactively (y/N) if omitted. |
+
+*`-TenantId` and `-TargetUpn` are not marked `Mandatory` in the parameter block so the script can run fully interactively with zero arguments, but you'll be prompted for both if they're missing.
+
+If none of `-ContentQuery`, `-Keywords`, or `-UseFinancialTemplate` are supplied, the script prompts interactively for which query-building method to use (see below).
+
 ## Preservation hold
 
 `-PlaceHold` is independent of how the query was built — it works the same whether
