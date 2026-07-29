@@ -247,6 +247,21 @@ function Invoke-WithRetry {
     }
 }
 
+function New-UniqueSearchDisplayName {
+    <#
+        Builds a search display name with a short random suffix so repeated
+        runs against the same mailbox (even in different cases) don't collide
+        with an existing compliance search name, which Graph rejects with a
+        409 "already exists" conflict.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetUpn
+    )
+
+    "Search - $TargetUpn - $((New-Guid).ToString().Substring(0, 8))"
+}
+
 function Read-RequiredValue {
     param(
         [string]$Prompt
@@ -412,14 +427,37 @@ if ([string]::IsNullOrWhiteSpace($case.Id)) {
 # Create the content search inside the case.
 # Retried because a freshly created case can still be provisioning in the
 # Purview backend, which surfaces here as a transient 409 conflict.
+#
+# Compliance search display names must be unique across the whole tenant, not
+# just within this case, so a plain "Search - <upn>" name can collide with a
+# search left over from an earlier run. Each attempt uses a fresh
+# uuid-suffixed name; if Graph still reports the name as taken (409 "already
+# exists"), generate another name and retry rather than aborting the run.
 Write-Host "Creating mailbox-scoped search..." -ForegroundColor Cyan
-$searchBody = @{
-    displayName  = "Search - $TargetUpn"
-    description  = "Mailbox-only search for $TargetUpn."
-    contentQuery = $FinalQuery
-}
-$search = Invoke-WithRetry -ActivityDescription 'Search creation' -ScriptBlock {
-    New-MgSecurityCaseEdiscoveryCaseSearch -EdiscoveryCaseId $case.Id -BodyParameter $searchBody -ErrorAction Stop
+$MaxSearchNameAttempts = 5
+$searchNameAttempt = 0
+$search = $null
+while (-not $search) {
+    $searchNameAttempt++
+    $searchDisplayName = New-UniqueSearchDisplayName -TargetUpn $TargetUpn
+    $searchBody = @{
+        displayName  = $searchDisplayName
+        description  = "Mailbox-only search for $TargetUpn."
+        contentQuery = $FinalQuery
+    }
+    try {
+        $search = Invoke-WithRetry -ActivityDescription 'Search creation' -ScriptBlock {
+            New-MgSecurityCaseEdiscoveryCaseSearch -EdiscoveryCaseId $case.Id -BodyParameter $searchBody -ErrorAction Stop
+        }
+    }
+    catch {
+        $isNameConflict = $_.Exception.Message -match 'already exists'
+        if ($isNameConflict -and $searchNameAttempt -lt $MaxSearchNameAttempts) {
+            Write-Host "  Search name '$searchDisplayName' already exists. Generating a new name and retrying ($searchNameAttempt/$MaxSearchNameAttempts)..." -ForegroundColor Yellow
+            continue
+        }
+        throw
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($search.Id)) {
