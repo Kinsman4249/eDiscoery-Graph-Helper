@@ -230,7 +230,11 @@ function Invoke-WithRetry {
         }
         catch {
             $isLastAttempt = $attempt -ge $MaxAttempts
-            $isProvisioningRace = $_.Exception.Message -match 'Object reference not set' -or $_.Exception.Message -match '409'
+            # Only the case-still-provisioning signature is transient and worth
+            # retrying. A plain "409" match is too broad - it also matches
+            # permanent conflicts like "already exists", which retrying would
+            # not fix.
+            $isProvisioningRace = $_.Exception.Message -match 'Object reference not set'
 
             if ($isLastAttempt -or -not $isProvisioningRace) {
                 throw
@@ -368,6 +372,7 @@ $RequiredCommands = @(
 
 if ($PlaceHold) {
     $RequiredCommands += @(
+        'Get-MgBetaSecurityCaseEdiscoveryCaseLegalHold',
         'New-MgBetaSecurityCaseEdiscoveryCaseLegalHold',
         'New-MgBetaSecurityCaseEdiscoveryCaseLegalHoldUserSource'
     )
@@ -434,27 +439,73 @@ Invoke-WithRetry -ActivityDescription 'Adding mailbox source' -ScriptBlock {
 
 # Optional preservation hold. This preserves matching mailbox content for the investigation.
 if ($PlaceHold) {
-    Write-Host "Creating preservation hold for $TargetUpn..." -ForegroundColor Cyan
-    $holdBody = @{
-        displayName  = "Preservation hold - $TargetUpn"
-        description  = "Preserve mailbox content for authorized investigation."
-        contentQuery = $FinalQuery
+    $holdDisplayName = "Preservation hold - $TargetUpn"
+
+    # Hold names are a compliance policy name, which is not scoped to this
+    # case alone, so a hold from an earlier run against the same mailbox can
+    # already exist. Check for it first instead of always trying to create
+    # one, since re-running this script against the same target is expected
+    # (e.g. after a prior run failed partway through).
+    Write-Host "Checking for an existing preservation hold for $TargetUpn..." -ForegroundColor Cyan
+    $existingHold = Get-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -ErrorAction Stop |
+        Where-Object { $_.DisplayName -eq $holdDisplayName } |
+        Select-Object -First 1
+
+    if ($existingHold) {
+        Write-Host "Preservation hold '$holdDisplayName' already exists (Id: $($existingHold.Id)). Skipping creation." -ForegroundColor Yellow
+        $hold = $existingHold
     }
-    $hold = Invoke-WithRetry -ActivityDescription 'Legal hold creation' -ScriptBlock {
-        New-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -BodyParameter $holdBody -ErrorAction Stop
+    else {
+        Write-Host "Creating preservation hold for $TargetUpn..." -ForegroundColor Cyan
+        $holdBody = @{
+            displayName  = $holdDisplayName
+            description  = "Preserve mailbox content for authorized investigation."
+            contentQuery = $FinalQuery
+        }
+        try {
+            $hold = Invoke-WithRetry -ActivityDescription 'Legal hold creation' -ScriptBlock {
+                New-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -BodyParameter $holdBody -ErrorAction Stop
+            }
+        }
+        catch {
+            # Another process (or a concurrent run) may have created the same
+            # hold between our check above and this create call. Treat that
+            # as success rather than a failure, and re-fetch it.
+            if ($_.Exception.Message -match 'already exists') {
+                Write-Host "Preservation hold '$holdDisplayName' was created concurrently. Reusing it." -ForegroundColor Yellow
+                $hold = Get-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -ErrorAction Stop |
+                    Where-Object { $_.DisplayName -eq $holdDisplayName } |
+                    Select-Object -First 1
+            }
+            else {
+                throw
+            }
+        }
     }
 
     if ([string]::IsNullOrWhiteSpace($hold.Id)) {
-        throw 'New-MgBetaSecurityCaseEdiscoveryCaseLegalHold returned no hold Id. Aborting.'
+        throw 'Could not create or locate the preservation hold. Aborting.'
     }
 
     $holdSource = @{
         email           = $TargetUpn
         includedSources = 'mailbox'
     }
-    Invoke-WithRetry -ActivityDescription 'Adding legal hold source' -ScriptBlock {
-        New-MgBetaSecurityCaseEdiscoveryCaseLegalHoldUserSource -EdiscoveryCaseId $case.Id -EdiscoveryHoldPolicyId $hold.Id -BodyParameter $holdSource -ErrorAction Stop
-    } | Out-Null
+    try {
+        Invoke-WithRetry -ActivityDescription 'Adding legal hold source' -ScriptBlock {
+            New-MgBetaSecurityCaseEdiscoveryCaseLegalHoldUserSource -EdiscoveryCaseId $case.Id -EdiscoveryHoldPolicyId $hold.Id -BodyParameter $holdSource -ErrorAction Stop
+        } | Out-Null
+    }
+    catch {
+        # The mailbox may already be a source on a reused hold. That is the
+        # desired end state, so do not fail the run over it.
+        if ($_.Exception.Message -match 'already exists') {
+            Write-Host "$TargetUpn is already a source on this hold. Skipping." -ForegroundColor Yellow
+        }
+        else {
+            throw
+        }
+    }
 }
 
 # Start an estimate/statistics run. This does not export content.
