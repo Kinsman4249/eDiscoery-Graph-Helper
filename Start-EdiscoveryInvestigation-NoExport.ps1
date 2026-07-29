@@ -172,11 +172,35 @@ $FinancialTemplateQuery = @'
 (etransfer OR "e-transfer" OR "email money transfer" OR Interac OR payment OR payments OR EFT OR "electronic funds" OR "wire transfer" OR "credit card" OR receipt OR receipts OR invoice OR invoices OR remittance OR "money transfer" OR "send money" OR deposit)
 '@
 
+function ConvertTo-AsciiQuotes {
+    <#
+        Normalizes Unicode "smart" quotes to plain ASCII quotes/apostrophes.
+        Purview's KQL parser only recognizes a straight double quote (U+0022)
+        as a phrase delimiter. Curly quotes introduced by Word, Outlook, a
+        browser, or a terminal's own autocorrect (common when a phrase is
+        typed or pasted at an interactive prompt) are not treated as
+        delimiters at all - they pass through as literal characters, which
+        silently breaks phrase matching and can leave the query with an
+        unbalanced quote count. Every string that reaches the final KQL
+        query is normalized through this function first.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    # Left/right single quotes and low/high-reversed variants -> apostrophe.
+    $Text = $Text -replace '[\u2018\u2019\u201A\u201B]', "'"
+    # Left/right double quotes and low/high-reversed variants -> double quote.
+    $Text = $Text -replace '[\u201C\u201D\u201E\u201F]', '"'
+    $Text
+}
+
 function ConvertTo-KqlFromKeywords {
     <#
         Joins a list of keywords/phrases into a single KQL clause.
-        Any entry containing whitespace is wrapped in double quotes; entries
-        already quoted are left alone.
+        Any entry containing whitespace is wrapped in double quotes.
     #>
     param(
         [string[]]$KeywordList,
@@ -184,9 +208,17 @@ function ConvertTo-KqlFromKeywords {
     )
 
     $terms = foreach ($word in $KeywordList) {
-        $trimmed = $word.Trim()
+        $trimmed = (ConvertTo-AsciiQuotes -Text $word).Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-        if ($trimmed -match '\s' -and $trimmed -notmatch '^".*"$') {
+
+        # Strip any quotes the operator already typed around the term -
+        # straight or curly, now normalized to straight above - so the wrap
+        # below is never doubled ("""term""") or mismatched (one straight,
+        # one curly). Wrapping is then decided purely by whitespace.
+        $trimmed = $trimmed.Trim('"')
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        if ($trimmed -match '\s') {
             '"{0}"' -f $trimmed
         }
         else {
@@ -262,6 +294,28 @@ function New-UniqueSearchDisplayName {
     "Search - $TargetUpn - $((New-Guid).ToString().Substring(0, 8))"
 }
 
+function New-UniqueHoldDisplayName {
+    <#
+        Builds a preservation hold (legal hold) display name with a short
+        random suffix. Hold names are compliance policy names, which - like
+        search names - are unique across the whole tenant, not scoped to a
+        single case. A fixed name such as "Preservation hold - <upn>" can
+        collide with a hold created by an earlier run against a different
+        case for the same mailbox; a case-scoped lookup for "does this hold
+        already exist" will not find that hold (it lives under the other
+        case), so the create call still fails with a 409 "already exists"
+        even though nothing under the current case matches. Suffixing with a
+        GUID avoids the collision at the source instead of trying to detect
+        and reuse a hold that create-time lookups cannot reliably locate.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetUpn
+    )
+
+    "Preservation hold - $TargetUpn - $((New-Guid).ToString().Substring(0, 8))"
+}
+
 function Read-RequiredValue {
     param(
         [string]$Prompt
@@ -292,10 +346,10 @@ function Get-InteractiveContentQuery {
 
     switch ($choice) {
         '1' {
-            Read-RequiredValue -Prompt 'Enter the raw KQL query'
+            ConvertTo-AsciiQuotes -Text (Read-RequiredValue -Prompt 'Enter the raw KQL query')
         }
         '2' {
-            $rawKeywords = Read-RequiredValue -Prompt 'Enter keywords/phrases, comma-separated (e.g. invoice, wire transfer, Interac)'
+            $rawKeywords = ConvertTo-AsciiQuotes -Text (Read-RequiredValue -Prompt 'Enter keywords/phrases, comma-separated (e.g. invoice, wire transfer, Interac)')
             $keywordList = $rawKeywords -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
             $opChoice = Read-Host -Prompt 'Join keywords with AND or OR? [OR]'
@@ -339,7 +393,7 @@ if (-not $PSBoundParameters.ContainsKey('PlaceHold')) {
 # --------------------------------------------------------------------------------
 
 if (-not [string]::IsNullOrWhiteSpace($ContentQuery)) {
-    $FinalQuery = $ContentQuery
+    $FinalQuery = ConvertTo-AsciiQuotes -Text $ContentQuery
 }
 elseif ($Keywords -and $Keywords.Count -gt 0) {
     $FinalQuery = ConvertTo-KqlFromKeywords -KeywordList $Keywords -Operator $KeywordOperator
@@ -476,25 +530,27 @@ Invoke-WithRetry -ActivityDescription 'Adding mailbox source' -ScriptBlock {
 } | Out-Null
 
 # Optional preservation hold. This preserves matching mailbox content for the investigation.
+#
+# Hold names are compliance policy names, which - like search names - are
+# unique tenant-wide, not scoped to a single case. A fixed name checked only
+# against the current case's hold list can miss a same-named hold that lives
+# under a different case, so create still fails with 409 "already exists"
+# even when the case-scoped lookup found nothing. Each attempt below uses a
+# fresh GUID-suffixed name (New-UniqueHoldDisplayName) to avoid that class of
+# collision at the source, the same approach already used for search names.
+# A missing or failed hold is never fatal to the run: if it cannot be
+# created after retries, the operator is asked whether to continue without
+# one instead of the script aborting silently past a partially-created case.
 if ($PlaceHold) {
-    $holdDisplayName = "Preservation hold - $TargetUpn"
+    $MaxHoldNameAttempts = 5
+    $holdNameAttempt = 0
+    $hold = $null
+    $holdSkipped = $false
 
-    # Hold names are a compliance policy name, which is not scoped to this
-    # case alone, so a hold from an earlier run against the same mailbox can
-    # already exist. Check for it first instead of always trying to create
-    # one, since re-running this script against the same target is expected
-    # (e.g. after a prior run failed partway through).
-    Write-Host "Checking for an existing preservation hold for $TargetUpn..." -ForegroundColor Cyan
-    $existingHold = Get-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -ErrorAction Stop |
-        Where-Object { $_.DisplayName -eq $holdDisplayName } |
-        Select-Object -First 1
-
-    if ($existingHold) {
-        Write-Host "Preservation hold '$holdDisplayName' already exists (Id: $($existingHold.Id)). Skipping creation." -ForegroundColor Yellow
-        $hold = $existingHold
-    }
-    else {
-        Write-Host "Creating preservation hold for $TargetUpn..." -ForegroundColor Cyan
+    while (-not $hold -and -not $holdSkipped) {
+        $holdNameAttempt++
+        $holdDisplayName = New-UniqueHoldDisplayName -TargetUpn $TargetUpn
+        Write-Host "Creating preservation hold for $TargetUpn ($holdDisplayName)..." -ForegroundColor Cyan
         $holdBody = @{
             displayName  = $holdDisplayName
             description  = "Preserve mailbox content for authorized investigation."
@@ -504,44 +560,59 @@ if ($PlaceHold) {
             $hold = Invoke-WithRetry -ActivityDescription 'Legal hold creation' -ScriptBlock {
                 New-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -BodyParameter $holdBody -ErrorAction Stop
             }
+
+            if ([string]::IsNullOrWhiteSpace($hold.Id)) {
+                # Treat an empty Id the same as a thrown error below rather
+                # than silently carrying on with an unusable hold object.
+                throw 'New-MgBetaSecurityCaseEdiscoveryCaseLegalHold returned no hold Id.'
+            }
         }
         catch {
-            # Another process (or a concurrent run) may have created the same
-            # hold between our check above and this create call. Treat that
-            # as success rather than a failure, and re-fetch it.
+            $isNameConflict = $_.Exception.Message -match 'already exists'
+            $hold = $null
+
+            if ($isNameConflict -and $holdNameAttempt -lt $MaxHoldNameAttempts) {
+                Write-Host "  Hold name '$holdDisplayName' already exists. Generating a new name and retrying ($holdNameAttempt/$MaxHoldNameAttempts)..." -ForegroundColor Yellow
+                continue
+            }
+
+            # Retries exhausted, or a non-conflict error. Do not abort the
+            # whole run over the hold alone - ask whether to proceed without
+            # one instead, since the case and search are already created.
+            Write-Host "Could not create a preservation hold after $holdNameAttempt attempt(s): $($_.Exception.Message)" -ForegroundColor Red
+            $skipAnswer = Read-Host -Prompt 'Continue WITHOUT a preservation hold? (y/N)'
+            if ($skipAnswer -match '^[Yy]') {
+                Write-Host 'Continuing without a preservation hold.' -ForegroundColor Yellow
+                $holdSkipped = $true
+                $PlaceHold = $false
+            }
+            else {
+                throw 'Preservation hold could not be created and the operator declined to continue without one. Aborting.'
+            }
+        }
+    }
+
+    if ($hold -and -not [string]::IsNullOrWhiteSpace($hold.Id)) {
+        $holdSource = @{
+            email           = $TargetUpn
+            includedSources = 'mailbox'
+        }
+        try {
+            Invoke-WithRetry -ActivityDescription 'Adding legal hold source' -ScriptBlock {
+                New-MgBetaSecurityCaseEdiscoveryCaseLegalHoldUserSource -EdiscoveryCaseId $case.Id -EdiscoveryHoldPolicyId $hold.Id -BodyParameter $holdSource -ErrorAction Stop
+            } | Out-Null
+        }
+        catch {
+            # The mailbox may already be a source on this hold (e.g. a
+            # retried attempt got further than it appeared to before
+            # failing). That is the desired end state, so do not fail the
+            # run over it.
             if ($_.Exception.Message -match 'already exists') {
-                Write-Host "Preservation hold '$holdDisplayName' was created concurrently. Reusing it." -ForegroundColor Yellow
-                $hold = Get-MgBetaSecurityCaseEdiscoveryCaseLegalHold -EdiscoveryCaseId $case.Id -ErrorAction Stop |
-                    Where-Object { $_.DisplayName -eq $holdDisplayName } |
-                    Select-Object -First 1
+                Write-Host "$TargetUpn is already a source on this hold. Skipping." -ForegroundColor Yellow
             }
             else {
                 throw
             }
-        }
-    }
-
-    if ([string]::IsNullOrWhiteSpace($hold.Id)) {
-        throw 'Could not create or locate the preservation hold. Aborting.'
-    }
-
-    $holdSource = @{
-        email           = $TargetUpn
-        includedSources = 'mailbox'
-    }
-    try {
-        Invoke-WithRetry -ActivityDescription 'Adding legal hold source' -ScriptBlock {
-            New-MgBetaSecurityCaseEdiscoveryCaseLegalHoldUserSource -EdiscoveryCaseId $case.Id -EdiscoveryHoldPolicyId $hold.Id -BodyParameter $holdSource -ErrorAction Stop
-        } | Out-Null
-    }
-    catch {
-        # The mailbox may already be a source on a reused hold. That is the
-        # desired end state, so do not fail the run over it.
-        if ($_.Exception.Message -match 'already exists') {
-            Write-Host "$TargetUpn is already a source on this hold. Skipping." -ForegroundColor Yellow
-        }
-        else {
-            throw
         }
     }
 }
