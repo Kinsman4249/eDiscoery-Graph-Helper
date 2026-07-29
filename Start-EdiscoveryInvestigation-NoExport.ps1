@@ -197,6 +197,36 @@ function ConvertTo-AsciiQuotes {
     $Text
 }
 
+function Remove-OuterQuoteWrap {
+    <#
+        Strips a single matching pair of leading/trailing straight single
+        quotes wrapping the ENTIRE query, if present.
+
+        Single quotes have no meaning anywhere in KQL syntax - Purview's
+        parser only recognizes double quotes for phrase matching. A leading
+        and trailing straight apostrophe around the whole query is not part
+        of the query at all; it is what is left over when a value is copied
+        from a command-line-style example - where the outer single quotes
+        are PowerShell's own argument quoting, not query text - and pasted
+        somewhere (an interactive prompt, a portal search box, this script's
+        own -ContentQuery value) that takes the text completely literally
+        instead of stripping shell quoting. This is the actual cause of the
+        broken query reported: the double-quoted terms inside were already
+        fine, but the whole expression was wrapped in a stray leading and
+        trailing '.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $trimmed = $Text.Trim()
+    if ($trimmed.Length -ge 2 -and $trimmed.StartsWith("'") -and $trimmed.EndsWith("'")) {
+        $trimmed = $trimmed.Substring(1, $trimmed.Length - 2).Trim()
+    }
+    $trimmed
+}
+
 function ConvertTo-KqlFromKeywords {
     <#
         Joins a list of keywords/phrases into a single KQL clause.
@@ -404,6 +434,12 @@ elseif ($UseFinancialTemplate) {
 else {
     $FinalQuery = Get-InteractiveContentQuery
 }
+
+# A stray leading/trailing single quote around the whole query is never
+# valid KQL - see Remove-OuterQuoteWrap for why. Applied once here so it
+# catches the artifact regardless of which of the four sources above
+# produced $FinalQuery.
+$FinalQuery = Remove-OuterQuoteWrap -Text $FinalQuery
 
 Write-Host ''
 Write-Host "Using content search query:" -ForegroundColor Cyan
