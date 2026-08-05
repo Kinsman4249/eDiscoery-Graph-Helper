@@ -114,17 +114,6 @@ Invoke-WebRequest `
 .\Start-EdiscoveryInvestigation-NoExport.ps1
 ```
 
-## Releasing a new version
-
-Releases are automatic — push a `vX.Y.Z` tag and the `Release` GitHub Actions
-workflow (`.github/workflows/release.yml`) builds a GitHub Release from it,
-attaching the script and auto-generated release notes:
-
-```powershell
-git tag v1.1.0
-git push origin v1.1.0
-```
-
 ## Contributing
 
 Bug reports, feature requests, and pull requests are welcome. See
